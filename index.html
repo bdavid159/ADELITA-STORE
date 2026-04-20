@@ -1034,6 +1034,17 @@
 
         const handleUpdateClient = (upd) => logic.setClients(activeClient.id, upd);
         const saveEdit = () => { handleUpdateClient({ name: editName, phone: editPhone, cedula: editCedula, province: editProvince, city: editCity, address: editAddress }); setIsEditing(false); };
+                const handleDeleteClient = async () => {
+            if (cycle.cycleSales.length > 0) {
+                return alert("⚠️ ALTO: No puedes eliminar a un cliente que todavía tiene prendas activas.\n\nPrimero usa el botón negro de 'Anular Pedido Completo' y luego sí elimínalo.");
+            }
+            if (window.confirm(`🛑 PELIGRO: ¿Eliminar a ${activeClient.name} (${activeClient.id})?\n\nEsta acción borrará su perfil del sistema por completo y no se puede deshacer.`)) {
+                await logic.deleteClient(activeClient.id);
+                alert("✅ Cliente eliminado del sistema.");
+                onBack(); // Te regresa a la lista de clientes automáticamente
+            }
+        };
+
         const handleSaveSaleEdit = async () => { if(!editingSale) return; try{ await window.fs.updateDoc(window.fs.doc(window.db,"sales",editingSale.fireId), { item: editingSale.item, value: parseFloat(editingSale.value), date: safeISO(editingSale.date) }); setEditingSale(null); } catch(e){ alert(e.message); } };
         const handleSavePaymentEdit = async () => { if(!editingPayment) return; let targetFireId = editingPayment.fireId; if (!targetFireId) { const f = (logic.payments||[]).find(p => p.id === editingPayment.id); if(f) targetFireId = f.fireId; } if(!targetFireId) return; try { await window.fs.updateDoc(window.fs.doc(window.db, "payments", targetFireId), { amount: parseFloat(editingPayment.amount), account: editingPayment.account, date: safeISO(editingPayment.date) }); setEditingPayment(null); } catch(e) { alert(e.message); } };
         const handleDeletePayment = async () => { if (!editingPayment) return; let targetFireId = editingPayment.fireId; if (!targetFireId) { const f = (logic.payments||[]).find(p => p.id === editingPayment.id); if(f) targetFireId = f.fireId; } if (targetFireId && confirm(`¿BORRAR PAGO DE $${editingPayment.amount}?`)) { try { await window.fs.deleteDoc(window.fs.doc(window.db, "payments", targetFireId)); setEditingPayment(null); } catch (e) { alert(e.message); } } };
@@ -1409,11 +1420,17 @@
                                             <div><label className="text-[10px] font-bold text-slate-400 uppercase">Ciudad</label><input value={editCity} onChange={e=>setEditCity(e.target.value)} className="w-full border-b-2 border-indigo-100 p-2 outline-none text-sm font-bold" /></div>
                                         </div>
                                         <div><label className="text-[10px] font-bold text-slate-400 uppercase">Dirección Exacta</label><textarea value={editAddress} onChange={e=>setEditAddress(e.target.value)} className="w-full border-2 border-indigo-50 p-2 rounded-lg text-xs font-bold h-16 outline-none resize-none" /></div>
-                                        <div className="flex gap-2 pt-2">
-                                            <button onClick={saveEdit} className="flex-1 bg-emerald-600 text-white py-3 rounded-lg font-bold text-xs shadow-md">Guardar Cambios</button>
-                                            <button onClick={()=>setIsEditing(false)} className="flex-1 bg-slate-200 text-slate-600 py-3 rounded-lg font-bold text-xs">Cancelar</button>
+                                                                               <div className="flex gap-2 pt-2">
+                                            <button onClick={saveEdit} className="flex-1 bg-emerald-600 text-white py-3 rounded-lg font-bold text-xs shadow-md active:scale-95">Guardar Cambios</button>
+                                            <button onClick={()=>setIsEditing(false)} className="flex-1 bg-slate-200 text-slate-600 py-3 rounded-lg font-bold text-xs active:scale-95">Cancelar</button>
+                                        </div>
+                                        <div className="pt-2 border-t border-red-50 mt-2">
+                                            <button onClick={handleDeleteClient} className="w-full bg-red-50 hover:bg-red-100 text-red-600 border border-red-100 py-3 rounded-lg font-bold text-xs flex justify-center items-center gap-2 active:scale-95 transition-all">
+                                                <Icon.Trash /> ELIMINAR CLIENTE POR COMPLETO
+                                            </button>
                                         </div>
                                     </div>
+
                                 ) : (
                                     <>
                                         <div className="flex items-center gap-3">
