@@ -843,9 +843,11 @@
         const processedSales = rawSales.map(s => ({...s}));
         const sortedForCalc = [...processedSales].sort((a,b) => new Date(safeISO(a.date)) - new Date(safeISO(b.date)));
         
-        const sortedPayments = [...(cycle.allPayments || [])]
+                const rawPayments = tabView === 'history' ? cycle.allPayments : cycle.cyclePayments;
+        const sortedPayments = [...(rawPayments || [])]
             .filter(p => !p.detail?.toLowerCase().includes("envío") && !p.detail?.toLowerCase().includes("logístico") && !p.detail?.toLowerCase().includes("arrastre"))
             .sort((a,b) => new Date(safeISO(a.date)) - new Date(safeISO(b.date)));
+
         
         let remainingPayments = sortedPayments.map(p => ({...p, unused: Number(p.amount) || 0}));
         let stats = { paid_ontime: 0, paid_late: 0, pending_ontime: 0, pending_late: 0 };
@@ -1342,11 +1344,12 @@
                             <div className="flex-1 bg-slate-50 text-slate-600 border border-slate-200 rounded-xl p-2 text-center shadow-sm">
                                 <div className="text-[10px] font-black uppercase tracking-tight">⏳ 24h Gracia</div><div className="text-lg font-black">{stats.pending_ontime}</div>
                             </div>
-                            {(stats.expired > 0 || stats.paid_late > 0) && (
+                            {(stats.pending_late > 0 || stats.paid_late > 0) && (
                                 <div className="flex-1 bg-red-50 text-red-700 border border-red-100 rounded-xl p-2 text-center shadow-sm">
-                                    <div className="text-[10px] font-black uppercase tracking-tight">🚨 Atrasadas</div><div className="text-lg font-black">{stats.expired + stats.paid_late}</div>
+                                    <div className="text-[10px] font-black uppercase tracking-tight">🚨 Atrasadas / Vencidas</div><div className="text-lg font-black">{stats.pending_late + stats.paid_late}</div>
                                 </div>
                             )}
+
                         </div>
 
                         <div className="flex border-b mb-2"><button onClick={()=>setTabView('cycle')} className={`flex-1 py-2 text-sm font-bold ${tabView==='cycle'?'text-indigo-600 border-b-2 border-indigo-600':'text-slate-400'}`}>Ciclo Actual</button><button onClick={()=>setTabView('history')} className={`flex-1 py-2 text-sm font-bold ${tabView==='history'?'text-indigo-600 border-b-2 border-indigo-600':'text-slate-400'}`}>Historial</button></div>
