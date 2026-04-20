@@ -785,6 +785,12 @@
         const [orderViewMode, setOrderViewMode] = useState('grouped'); 
         const [tabView, setTabView] = useState('cycle'); 
         const [paymentTab, setPaymentTab] = useState('cycle'); 
+        // --- PARCHE 1: ESTADOS DE LIQUIDACIÓN ---
+        const [showLiquidateModal, setShowLiquidateModal] = useState(false);
+        const [itemsToLiquidateState, setItemsToLiquidateState] = useState([]);
+        const [liquidationMessage, setLiquidationMessage] = useState("");
+
+
 
         const [cancellationHistory, setCancellationHistory] = useState([]);
         const [alertMinimized, setAlertMinimized] = useState(false);
@@ -992,36 +998,47 @@
 
         const cycleStartDateStr = cycle.lastShipmentDate.toLocaleDateString() === '12/31/1969' ? 'Inicio' : new Date(safeISO(cycle.lastShipmentDate)).toLocaleDateString();
         
-        const handlePartialLiquidation = async () => {
-            const itemsToLiquidate = sortedForCalc.filter(i => i.__status === 'pending_late');
-            if (itemsToLiquidate.length === 0) return alert("¡Todo en orden! 🎉\n\nNo hay prendas VENCIDAS para liquidar.");
+        // --- PARCHE 2: LÓGICA DE LIQUIDACIÓN Y MENSAJE VISIBLE ---
+        const handlePartialLiquidationClick = () => {
+            const items = sortedForCalc.filter(i => i.__status === 'pending_late');
+            if (items.length === 0) return alert("¡Todo en orden! 🎉\n\nNo hay prendas VENCIDAS para liquidar.");
             
-            // Calculamos con datos exactos sin aproximar
-            const totalValue = itemsToLiquidate.reduce((sum, i) => sum + (Number(i.value)||0), 0);
+            const totalValue = items.reduce((sum, i) => sum + (Number(i.value)||0), 0);
+            const listaPrendas = items.map(i => `▪️ ${i.item} ($${Number(i.value).toFixed(2)})`).join('\n');
+            const fechaHoy = new Date().toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' });
             
-            if (window.confirm(`⚠️ CONFIRMAR REMATE DE PRENDAS VENCIDAS\n\nValor a liquidar: $${totalValue.toFixed(2)}\n\n¿Proceder?`)) {
-                await logCancellation(itemsToLiquidate, "Liquidación Automática (Vencidas)", totalValue);
-                
-                // Generar lista exacta de prendas para el mensaje
-                const listaPrendas = itemsToLiquidate.map(i => `▪️ ${i.item} ($${Number(i.value).toFixed(2)})`).join('\n');
-                
-                for (const item of itemsToLiquidate) {
-                    await logic.deleteSale(item);
-                }
-                
-                // Armar el mensaje para WhatsApp
-                const mensajeCliente = `Hola ${activeClient.name}, te saludamos de Adelita Store. 🌸\n\nTe informamos que, debido a la falta de registro de pago y al haber finalizado el tiempo de reserva, el sistema ha procedido a liquidar las siguientes prendas de tu cuenta:\n\n${listaPrendas}\n\nValor total liquidado: $${totalValue.toFixed(2)}\n\nAgradecemos mucho tu comprensión.`;
-                
-                try {
-                    // Intenta copiar automáticamente al portapapeles
-                    await navigator.clipboard.writeText(mensajeCliente);
-                    alert("✅ Limpieza exitosa.\n\nEl mensaje detallado ya se copió automáticamente. Solo abre el chat de tu cliente y pon 'Pegar'.");
-                } catch (err) {
-                    // Si el navegador bloquea la copia automática, muestra una cajita para copiar a mano
-                    window.prompt("✅ Limpieza exitosa. Copia este mensaje para enviarlo:", mensajeCliente);
-                }
-            }
+            // Aquí armamos el mensaje ANTES de abrir la ventana
+            const msj = `Hola ${activeClient.name}, te saludamos de Adelita Store. 🌸\n\nTe informamos que hoy, ${fechaHoy}, debido a la falta de registro de pago y al haber finalizado el tiempo de gracia, el sistema ha procedido a liquidar las siguientes prendas de tu cuenta:\n\n${listaPrendas}\n\nValor total liquidado: $${totalValue.toFixed(2)}\n\nAgradecemos mucho tu comprensión.`;
+            
+            setItemsToLiquidateState(items);
+            setLiquidationMessage(msj);
+            setShowLiquidateModal(true); // Abre la ventana
         };
+
+        const confirmAndCopyLiquidation = async () => {
+            const totalValue = itemsToLiquidateState.reduce((sum, i) => sum + (Number(i.value)||0), 0);
+            await logCancellation(itemsToLiquidateState, "Liquidación Automática (Vencidas)", totalValue);
+            
+            for (const item of itemsToLiquidateState) {
+                await logic.deleteSale(item);
+            }
+            
+            // Truco "a prueba de balas" para forzar el copiado en tu iPad/PC
+            try {
+                const el = document.createElement('textarea');
+                el.value = liquidationMessage;
+                document.body.appendChild(el);
+                el.select();
+                document.execCommand('copy');
+                document.body.removeChild(el);
+                alert("✅ Limpieza exitosa y mensaje copiado al portapapeles.\n\nYa puedes ir a WhatsApp y pegar el mensaje.");
+            } catch (err) {
+                alert("✅ Limpieza exitosa.\n\nTu navegador bloqueó el copiado automático. Por favor, selecciona y copia el texto manualmente de la caja.");
+            }
+            
+            setShowLiquidateModal(false);
+        };
+
 
         // === WHATSAPP A PRUEBA DE BALAS ===
         const generateWaMessage = () => {
@@ -1233,6 +1250,33 @@
                 {editingPayment && (<div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center p-6" onClick={()=>setEditingPayment(null)}><div className="bg-white rounded-3xl p-6 w-full max-w-sm space-y-4" onClick={e=>e.stopPropagation()}><h3 className="font-bold text-center">Editar Pago</h3><select value={editingPayment.account||'pichincha'} onChange={e=>setEditingPayment({...editingPayment,account:e.target.value})} className="w-full p-3 bg-indigo-50 border rounded-xl font-bold"><option value="pichincha">Pichincha</option><option value="guayaquil">Guayaquil</option><option value="pacifico">Pacífico</option><option value="efectivo">Efectivo</option></select><div className="grid grid-cols-2 gap-3"><input type="number" value={editingPayment.amount} onChange={e=>setEditingPayment({...editingPayment,amount:e.target.value})} className="p-3 border rounded-xl" /><input type="date" value={editingPayment.date.split('T')[0]} onChange={e=>setEditingPayment({...editingPayment,date:e.target.value})} className="p-3 border rounded-xl" /></div><div className="flex gap-2"><button onClick={handleSavePaymentEdit} className="flex-1 py-3 bg-emerald-600 text-white font-bold rounded-xl">Guardar</button></div><button onClick={handleDeletePayment} className="w-full py-3 bg-red-100 text-red-600 font-bold rounded-xl border border-red-200 flex justify-center gap-2"><Icon.Trash /> ELIMINAR</button></div></div>)}
                 {editingSale && (<div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center p-6" onClick={()=>setEditingSale(null)}><div className="bg-white rounded-3xl p-6 w-full max-w-sm space-y-4" onClick={e=>e.stopPropagation()}><h3 className="font-bold text-center">Editar Venta</h3><input type="date" value={editingSale.date.split('T')[0]} onChange={e=>setEditingSale({...editingSale,date:e.target.value})} className="w-full p-3 border rounded-xl" /><input value={editingSale.item} onChange={e=>setEditingSale({...editingSale,item:e.target.value})} className="w-full p-3 border rounded-xl" /><input type="number" value={editingSale.value} onChange={e=>setEditingSale({...editingSale,value:e.target.value})} className="w-full p-3 border rounded-xl font-bold text-emerald-600" /><button onClick={handleSaveSaleEdit} className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl">Guardar</button></div></div>)}
 
+                 {/* --- PARCHE 3: VENTANA EMERGENTE DE LIQUIDACIÓN --- */}
+                {showLiquidateModal && (
+                    <div className="fixed inset-0 bg-black/80 z-[80] flex items-center justify-center p-4 animate-in fade-in" onClick={()=>setShowLiquidateModal(false)}>
+                        <div className="bg-white rounded-3xl p-6 w-full max-w-md shadow-2xl relative" onClick={e=>e.stopPropagation()}>
+                            <button onClick={()=>setShowLiquidateModal(false)} className="absolute top-4 right-4 text-slate-400 font-bold w-8 h-8 flex items-center justify-center bg-slate-100 rounded-full">✕</button>
+                            <h3 className="font-black text-red-600 text-xl flex items-center gap-2 mb-2"><Icon.Alert /> Liquidar Prendas</h3>
+                            <p className="text-xs text-slate-500 mb-4">Detalle de prendas vencidas a retirar:</p>
+                            <div className="bg-red-50 border border-red-100 rounded-xl p-3 max-h-40 overflow-y-auto mb-4">
+                                {itemsToLiquidateState.map((item, idx) => (
+                                    <div key={idx} className="flex justify-between text-xs font-bold text-red-800 mb-1 border-b border-red-100/50 pb-1 last:border-0">
+                                        <span>{item.item}</span>
+                                        <span>${(Number(item.value)||0).toFixed(2)}</span>
+                                    </div>
+                                ))}
+                            </div>
+                            <div className="flex justify-between items-center mb-6 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                                <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">Total:</span>
+                                <span className="text-xl font-black text-slate-800">${itemsToLiquidateState.reduce((sum, i) => sum + (Number(i.value)||0), 0).toFixed(2)}</span>
+                            </div>
+                            <div className="flex gap-2">
+                                <button onClick={()=>setShowLiquidateModal(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl active:scale-95">Cerrar</button>
+                                <button onClick={confirmAndCopyLiquidation} className="flex-[2] py-3 bg-red-600 text-white font-black rounded-xl shadow-lg flex items-center justify-center gap-2 active:scale-95"><Icon.Copy /> LIQUIDAR Y COPIAR MSJ</button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
                 <div className="p-4 border-b flex justify-between sticky top-0 bg-white z-10"><button onClick={onBack} className="text-slate-500 font-bold">← Atrás</button><div className={`text-xs px-3 py-1 rounded-full border font-bold ${status.color}`}>{status.label}</div></div>
                 <ReputationCard />
 
@@ -1381,17 +1425,18 @@
                             
                             <SalesListRenderer sales={sortedForCalc} shipments={clientShipments} isHistory={tabView==='history'} viewMode={orderViewMode} totalPaid={cycle.totalNormalPaid} onDeleteSale={handleDeleteSingleSale} onEditSale={setEditingSale} onDeleteGroup={handleDeleteGroup} onUndoShipment={handleUndoShipment} />
                             
+                            {/* --- PARCHE 4: BOTONES ACTUALIZADOS --- */}
                             {cycle.cycleSales.length > 0 && tabView === 'cycle' && ( 
                                 <div className="mt-6 border-t pt-4 space-y-3"> 
-                                    <button onClick={handlePartialLiquidation} className="w-full py-4 bg-red-600 text-white shadow-lg shadow-red-600/30 rounded-2xl font-black text-sm flex justify-center items-center gap-3 hover:bg-red-700 active:scale-95 transition-all"> 
+                                    <button onClick={handlePartialLiquidationClick} className="w-full py-4 bg-red-600 text-white shadow-lg shadow-red-600/30 rounded-2xl font-black text-sm flex justify-center items-center gap-3 hover:bg-red-700 active:scale-95 transition-all"> 
                                         <Icon.Zap /> ♻️ LIQUIDAR PRENDAS VENCIDAS (ROJAS)
                                     </button> 
                                     <button onClick={handleWipeCycle} className="w-full py-4 bg-slate-800 text-white shadow-lg shadow-slate-800/30 rounded-2xl font-black text-sm flex justify-center items-center gap-3 hover:bg-slate-900 active:scale-95 transition-all"> 
                                         <Icon.Trash /> 🛑 ANULAR PEDIDO COMPLETO (Renunció)
                                     </button> 
                                 </div> 
-
                             )}
+
                         </div>
                         
                         <div className="pt-4 border-t mt-4">
