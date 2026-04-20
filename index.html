@@ -785,6 +785,12 @@
         const [orderViewMode, setOrderViewMode] = useState('grouped'); 
         const [tabView, setTabView] = useState('cycle'); 
         const [paymentTab, setPaymentTab] = useState('cycle'); 
+                // --- ESTADOS EXCLUSIVOS PARA EL BOTÓN NEGRO (ANULAR PEDIDO) ---
+        const [showWipeConfirm, setShowWipeConfirm] = useState(false);
+        const [showWipeSuccess, setShowWipeSuccess] = useState(false);
+        const [showWipeMessage, setShowWipeMessage] = useState(false);
+        const [wipeMsgText, setWipeMsgText] = useState("");
+
         // --- PARCHE 1: ESTADOS DE LIQUIDACIÓN PASO A PASO ---
         const [showLiqConfirm, setShowLiqConfirm] = useState(false);
         const [showLiqSuccess, setShowLiqSuccess] = useState(false);
@@ -976,7 +982,45 @@
         const logCancellation = async (items, reason, totalAmount) => { try { await window.fs.addDoc(window.fs.collection(window.db, 'cancellations'), { clientId: activeClient.id, date: new Date().toISOString(), reason: reason, itemsCount: items.length, totalAmount: parseFloat(totalAmount) || 0, detail: items.map(i => i.item).join(", ") }); } catch(e) {} };
         const handleDeleteSingleSale = async (item) => { if(window.confirm(`¿Mover a papelera "${item.item}"?`)) { await logic.deleteSale(item); } };
         const handleDeleteGroup = async (items) => { if(!items || items.length === 0) return; if(window.confirm(`⚠️ ¿MOVER TODO EL LIVE (${items.length} prendas) A PAPELERA?`)) { const total = items.reduce((sum, i) => sum + (Number(i.value)||0), 0); await logCancellation(items, "Eliminó Live Completo", total); for (const item of items) { await logic.deleteSale(item); } } };
-        const handleWipeCycle = async () => { const count = cycle.cycleSales.length; const totalDebt = cycle.totalSales; if (count === 0) return alert("Nada que borrar."); if (window.confirm(`🛑 ¿ANULAR PEDIDO COMPLETO?`)) { await logCancellation(cycle.cycleSales, "ANULADO: No Pagó / Renunció", totalDebt); for (const item of cycle.cycleSales) { await logic.deleteSale(item); } alert("✅ Pedido anulado."); } };
+                // --- LÓGICA EXCLUSIVA PARA EL BOTÓN NEGRO (ANULAR PEDIDO) ---
+        const handleWipeCycleClick = () => {
+            if (cycle.cycleSales.length === 0) return alert("No hay prendas para anular en este pedido.");
+            setShowWipeConfirm(true); // Abre la confirmación
+        };
+
+        const executeWipe = async () => {
+            const items = cycle.cycleSales;
+            const payments = cycle.cyclePayments;
+            const total = items.reduce((sum, i) => sum + (Number(i.value)||0), 0);
+            const totalAbonos = payments.reduce((sum, p) => sum + (Number(p.amount)||0), 0);
+            const lista = items.map(i => `▪️ ${i.item} ($${Number(i.value).toFixed(2)})`).join('\n');
+            const fecha = new Date().toLocaleDateString('es-ES', { day: 'numeric', month: 'long' });
+
+            const msj = `Hola ${activeClient.name}, te saludamos de Adelita Store. 🌸\n\nTe informamos que hoy ${fecha}, al haber superado el tiempo máximo de espera sin retiro de mercadería, hemos procedido a ANULAR por completo tu pedido:\n\n${lista}\n\nValor de prendas liberadas: $${total.toFixed(2)}\nPenalización por abandono (abonos perdidos): $${totalAbonos.toFixed(2)}\n\nTu cuenta ha quedado en $0.00. Agradecemos tu comprensión.`;
+            
+            await logCancellation(items, "ANULADO: Retención/Abandono", total);
+            
+            // 1. Borrar pagos (penalidad)
+            for (const p of payments) {
+                if (p.fireId) await window.fs.deleteDoc(window.fs.doc(window.db, "payments", p.fireId));
+            }
+            // 2. Borrar prendas
+            for (const item of items) { 
+                await logic.deleteSale(item); 
+            }
+
+            setWipeMsgText(msj);
+            setShowWipeConfirm(false);
+            setShowWipeSuccess(true); // Abre la pantalla de éxito
+        };
+
+        const copyWipeMessage = () => {
+            const t = document.getElementById('wipe-txt-area');
+            t.select();
+            document.execCommand('copy');
+            alert("¡Mensaje copiado al portapapeles! ✅");
+        };
+
         const handleRestore = async (item) => { if(confirm(`¿Restaurar "${item.item}" al pedido?`)) { await logic.restoreSale(item); if(clientTrash.length <= 1) setShowTrash(false); } };
         const handleDestroy = async (item) => { if(confirm(`🛑 ¿ELIMINAR DEFINITIVAMENTE?`)) { await logic.destroySale(item); if(clientTrash.length <= 1) setShowTrash(false); } };
         const handleResurrectFromHistory = async (h) => { try { const amount = parseFloat(h.totalAmount) || parseFloat(h.value) || parseFloat(h.amount) || 0; if (amount <= 0) return alert("⚠️ No se puede recuperar."); if (!window.confirm(`¿Deseas recuperar esta deuda?\n\nValor: $${amount.toFixed(2)}`)) return; const cleanDetail = `(Recuperado) ${h.reason || 'Papelera'}`; await logic.addSale(activeClient.id, cleanDetail, amount, new Date().toISOString()); alert("✅ Deuda recuperada."); } catch (error) { alert("Error de conexión."); } };
@@ -1293,6 +1337,60 @@
                     </div>
                 )}
 
+                  {/* --- MODALES EXCLUSIVOS PARA ANULAR PEDIDO COMPLETO --- */}
+                {showWipeConfirm && (
+                    <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-4">
+                        <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl">
+                            <h3 className="font-black text-slate-800 text-lg mb-2">🛑 ¿ANULAR PEDIDO COMPLETO?</h3>
+                            <p className="text-xs text-slate-500 mb-4">
+                                Se eliminarán <b>{cycle.cycleSales.length} prendas</b> de la cuenta.
+                                {cycle.cyclePayments.length > 0 && (
+                                    <span className="block mt-2 text-red-600 font-bold bg-red-50 p-2 rounded-lg">
+                                        ⚠️ ATENCIÓN: También se eliminarán definitivamente {cycle.cyclePayments.length} abonos (${cycle.cyclePayments.reduce((s, p) => s + (Number(p.amount)||0), 0).toFixed(2)}) como penalidad por abandono.
+                                    </span>
+                                )}
+                            </p>
+                            <div className="flex gap-2">
+                                <button onClick={()=>setShowWipeConfirm(false)} className="flex-1 py-3 bg-slate-100 text-slate-500 font-bold rounded-xl">Cancelar</button>
+                                <button onClick={executeWipe} className="flex-1 py-3 text-white font-bold rounded-xl shadow-lg bg-slate-900 active:scale-95">
+                                    Sí, Anular Todo
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {showWipeSuccess && (
+                    <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-4">
+                        <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl text-center">
+                            <div className="text-4xl mb-2">✅</div>
+                            <h3 className="font-black text-slate-800 text-lg">¡Anulación Exitosa!</h3>
+                            <p className="text-xs text-slate-500 mb-6">Se liberaron las prendas y se limpiaron los abonos.</p>
+                            <div className="space-y-2">
+                                <button onClick={()=>{setShowWipeSuccess(false); setShowWipeMessage(true);}} className="w-full py-4 bg-indigo-600 text-white font-black rounded-2xl shadow-lg active:scale-95">VER MENSAJE PARA CLIENTE ✉️</button>
+                                <button onClick={()=>setShowWipeSuccess(false)} className="w-full py-3 text-slate-400 font-bold hover:bg-slate-50 rounded-xl">Cerrar sin avisar</button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {showWipeMessage && (
+                    <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-4" onClick={()=>setShowWipeMessage(false)}>
+                        <div className="bg-white rounded-3xl w-full max-w-lg shadow-2xl flex flex-col" onClick={e=>e.stopPropagation()}>
+                            <div className="p-4 border-b flex justify-between items-center">
+                                <h3 className="font-black text-slate-700">Aviso de Anulación</h3>
+                                <button onClick={()=>setShowWipeMessage(false)} className="text-slate-400 font-bold text-xl">✕</button>
+                            </div>
+                            <div className="p-4">
+                                <textarea id="wipe-txt-area" readOnly className="w-full h-56 p-4 bg-slate-50 border border-slate-200 rounded-2xl text-[11px] font-mono outline-none resize-none text-slate-700 shadow-inner" value={wipeMsgText}></textarea>
+                                <button onClick={copyWipeMessage} className="w-full mt-4 bg-slate-900 active:scale-95 transition-transform text-white py-4 rounded-2xl font-black flex justify-center items-center gap-2 shadow-xl">
+                                    <Icon.Copy /> COPIAR TEXTO PARA PEGAR
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+             
                 <div className="p-4 border-b flex justify-between sticky top-0 bg-white z-10"><button onClick={onBack} className="text-slate-500 font-bold">← Atrás</button><div className={`text-xs px-3 py-1 rounded-full border font-bold ${status.color}`}>{status.label}</div></div>
                 <ReputationCard />
 
@@ -1448,9 +1546,10 @@
                                     <button onClick={startLiquidation} className="w-full py-4 bg-red-600 text-white shadow-lg shadow-red-600/30 rounded-2xl font-black text-sm flex justify-center items-center gap-3 hover:bg-red-700 active:scale-95 transition-all"> 
                                         <Icon.Zap /> ♻️ LIQUIDAR PRENDAS VENCIDAS (ROJAS)
                                     </button> 
-                                    <button onClick={handleWipeCycle} className="w-full py-4 bg-slate-800 text-white shadow-lg shadow-slate-800/30 rounded-2xl font-black text-sm flex justify-center items-center gap-3 hover:bg-slate-900 active:scale-95 transition-all"> 
-                                        <Icon.Trash /> 🛑 ANULAR PEDIDO COMPLETO (Renunció)
-                                    </button> 
+                                    <button onClick={handleWipeCycleClick} className="w-full py-4 bg-slate-800 text-white shadow-lg shadow-slate-800/30 rounded-2xl font-black text-sm flex justify-center items-center gap-3 hover:bg-slate-900 active:scale-95 transition-all"> 
+    <Icon.Trash /> 🛑 ANULAR PEDIDO COMPLETO (Renunció)
+</button> 
+
                                 </div> 
                             )}
 
