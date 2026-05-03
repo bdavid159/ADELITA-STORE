@@ -2418,12 +2418,25 @@
         const [selectedMonth, setSelectedMonth] = useState('all');
 
         // ---------------------------------------------------------
+                // ---------------------------------------------------------
         // 1. CÁLCULOS DE CAJA REAL (BALANCE GLOBAL - NUNCA SE REINICIA)
         // ---------------------------------------------------------
         const balances = { pichincha: 0, guayaquil: 0, pacifico: 0, efectivo: 0 };
-        logic.payments.forEach(p => { const acc = (p.account || 'pichincha').toLowerCase().trim(); const val = parseFloat(p.amount) || 0; if(balances[acc] !== undefined) balances[acc] += val; });
-        logic.expenses.forEach(e => { const acc = (e.account || 'pichincha').toLowerCase().trim(); const val = parseFloat(e.amount) || 0; if(balances[acc] !== undefined) balances[acc] -= val; });
+        logic.payments.forEach(p => { 
+            // CORRECCIÓN: Ignorar el "Arrastre" para no duplicar el dinero en los bancos
+            if (p.detail && p.detail.toLowerCase().includes('arrastre')) return;
+            
+            const acc = (p.account || 'pichincha').toLowerCase().trim(); 
+            const val = parseFloat(p.amount) || 0; 
+            if(balances[acc] !== undefined) balances[acc] += val; 
+        });
+        logic.expenses.forEach(e => { 
+            const acc = (e.account || 'pichincha').toLowerCase().trim(); 
+            const val = parseFloat(e.amount) || 0; 
+            if(balances[acc] !== undefined) balances[acc] -= val; 
+        });
         const currentBalanceGlobal = balances.pichincha + balances.guayaquil + balances.pacifico + balances.efectivo;
+
         
         const totalReceivable = logic.clients.reduce((acc, c) => { const cy = logic.getClientCycle(c.id); return acc + (cy.clothingBalance < -0.01 ? Math.abs(cy.clothingBalance) : 0); }, 0); 
 
@@ -2473,10 +2486,21 @@
         const expensesPersonal = filteredExpenses.filter(e => e.category === 'personal').reduce((acc, e) => acc + (parseFloat(e.amount)||0), 0);
         const expensesShipping = filteredExpenses.filter(e => e.category === 'shipping').reduce((acc, e) => acc + (parseFloat(e.amount)||0), 0);
         
-        const ingresosRopa = filteredPayments.filter(p => !p.detail?.toLowerCase().includes("envío") && !p.detail?.toLowerCase().includes("transf") && !p.detail?.toLowerCase().includes("ajuste")).reduce((acc, p) => acc + (parseFloat(p.amount)||0), 0);
+        // CORRECCIÓN: Filtramos los "arrastres" y "transferencias" para no inflar las ganancias de la tienda
+        const ingresosRopa = filteredPayments
+            .filter(p => !p.detail?.toLowerCase().includes("envío") && !p.detail?.toLowerCase().includes("transf") && !p.detail?.toLowerCase().includes("ajuste") && !p.detail?.toLowerCase().includes("arrastre"))
+            .reduce((acc, p) => acc + (parseFloat(p.amount)||0), 0);
+            
         const utilidadPura = ingresosRopa - expensesBusiness;
 
-        const metrics = { totalCollected: filteredPayments.reduce((a,b)=>a+(parseFloat(b.amount)||0),0), totalExpenses: filteredExpenses.reduce((a,b)=>a+(parseFloat(b.amount)||0),0), profit: utilidadPura };
+        const metrics = { 
+            // Total ingresado REAL (sin contar dinero que solo se movió de cuenta o arrastres)
+            totalCollected: filteredPayments.filter(p => !p.detail?.toLowerCase().includes("arrastre") && !p.detail?.toLowerCase().includes("transf")).reduce((a,b)=>a+(parseFloat(b.amount)||0),0), 
+            // Total gastado REAL (sin contar las transferencias internas)
+            totalExpenses: filteredExpenses.filter(e => e.category !== 'transfer_out').reduce((a,b)=>a+(parseFloat(b.amount)||0),0), 
+            profit: utilidadPura 
+        };
+
 
         // ---------------------------------------------------------
         // FUNCIONES
