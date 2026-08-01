@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Adelita Store System v6.4 (Client Code & Balance)</title>
+    <title>Adelita Store System v7.0 (WhatsApp & Bodega)</title>
     
     <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
@@ -21,8 +21,9 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
         // AQUI ESTABA EL ERROR: Faltaba importar 'query' y 'where'
-        import { getFirestore, collection, addDoc, onSnapshot, enableIndexedDbPersistence, updateDoc, deleteDoc, doc, query, where } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, onSnapshot, enableIndexedDbPersistence, updateDoc, deleteDoc, doc, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
         import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+        import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-functions.js";
 
         const firebaseConfig = {
             apiKey: "AIzaSyDwuUYz-veTNMBrZQ_exfsw4C8OTEeaKOY",
@@ -36,6 +37,7 @@
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
         const auth = getAuth(app);
+        const functions = getFunctions(app, "us-central1");
 
         enableIndexedDbPersistence(db).catch((err) => {
             if (err.code == 'failed-precondition') {
@@ -48,8 +50,9 @@
         window.db = db;
         window.auth = auth;
         // AQUI LAS AGREGAMOS A LA CAJA DE HERRAMIENTAS GLOBAL:
-        window.fs = { collection, addDoc, onSnapshot, updateDoc, deleteDoc, doc, query, where };
+        window.fs = { collection, addDoc, onSnapshot, updateDoc, deleteDoc, doc, query, where, getDocs };
         window.fbAuth = { signInWithEmailAndPassword, onAuthStateChanged, signOut };
+        window.fbFunctions = { functions, httpsCallable };
         
         window.firebaseLoaded = true;
         if(window.initReactApp) window.initReactApp();
@@ -299,7 +302,7 @@
 ¡Bienvenida a *Adelita Store*! 🛍️✨
 
 Tu código personal para comprar en nuestros lives es:
-🔐 *${clientCode}*
+🌟🔐 *CÓDIGO: ${clientCode}* 🔐🌟
 
 *¿Cómo debes usarlo?*
 • Cuando te guste una prenda, comenta: *MÍO ${clientCode}*.
@@ -338,6 +341,74 @@ Guarda este mensaje para tus próximos lives. 💖
         return digits;
     };
 
+    // Distribuye los abonos desde las prendas mas antiguas hacia las nuevas.
+    // Asi el resumen muestra unicamente los lives que todavia tienen saldo.
+    const getOutstandingBalanceSummary = (cycle) => {
+        const safeCycle = cycle || {};
+        const targetDebt = Math.max(0, -(Number(safeCycle.clothingBalance) || 0));
+        if (targetDebt <= 0.01) return { debt: 0, itemsCount: 0, lives: [], livesText: 'Sin lives pendientes' };
+
+        const sales = [...(safeCycle.cycleSales || [])]
+            .filter(s => (Number(s.value) || 0) > 0)
+            .sort((a, b) => new Date(safeISO(a.date)) - new Date(safeISO(b.date)) || (Number(a.id) || 0) - (Number(b.id) || 0));
+
+        let availablePayment = Math.max(0, Number(safeCycle.totalNormalPaid) || 0);
+        const groups = new Map();
+        let allocatedDebt = 0;
+        let itemsCount = 0;
+
+        sales.forEach(sale => {
+            const value = Number(sale.value) || 0;
+            const applied = Math.min(availablePayment, value);
+            availablePayment = Math.max(0, availablePayment - applied);
+            const pending = Math.max(0, value - applied);
+            if (pending <= 0.01) return;
+
+            const isPreviousDebt = String(sale.item || '').toLowerCase().includes('deuda ciclo anterior');
+            const date = new Date(safeISO(sale.date));
+            const key = isPreviousDebt ? 'previous' : date.toISOString().slice(0, 10);
+            const label = isPreviousDebt
+                ? 'Saldo anterior'
+                : date.toLocaleDateString('es-EC', { day: 'numeric', month: 'long' });
+            if (!groups.has(key)) groups.set(key, { key, label, amount: 0, itemsCount: 0, date });
+            const group = groups.get(key);
+            group.amount += pending;
+            group.itemsCount += 1;
+            allocatedDebt += pending;
+            itemsCount += 1;
+        });
+
+        // Protege los casos contables extraordinarios (por ejemplo, un ajuste negativo).
+        if (targetDebt - allocatedDebt > 0.01) {
+            groups.set('adjustment', {
+                key: 'adjustment', label: 'Ajuste pendiente', amount: targetDebt - allocatedDebt,
+                itemsCount: 0, date: new Date(0)
+            });
+        }
+
+        const lives = Array.from(groups.values()).sort((a, b) => a.date - b.date);
+        const dateLives = lives.filter(l => l.key !== 'previous' && l.key !== 'adjustment');
+        const specialLives = lives.filter(l => l.key === 'previous' || l.key === 'adjustment');
+        const dateText = dateLives.map(l => l.label).join(', ').replace(/, ([^,]*)$/, ' y $1');
+        const specialText = specialLives.map(l => l.label).join(', ');
+        const livesText = [dateText, specialText].filter(Boolean).join(' + ') || 'Saldo pendiente';
+
+        return { debt: targetDebt, itemsCount, lives, livesText };
+    };
+
+    const buildBalanceTemplateData = (client, cycle) => {
+        const summary = getOutstandingBalanceSummary(cycle);
+        return {
+            clientId: client?.id || '',
+            name: String(client?.name || 'hermosa').trim(),
+            phone: normalizeWhatsAppPhone(client?.phone),
+            lives: summary.livesText,
+            itemsCount: summary.itemsCount,
+            amount: Number(summary.debt.toFixed(2)),
+            groups: summary.lives
+        };
+    };
+
     const ClientCodeModal = ({ client, onClose }) => {
         if (!client) return null;
         const message = buildClientCodeMessage(client);
@@ -364,7 +435,7 @@ Guarda este mensaje para tus próximos lives. 💖
                     <div className="p-5 space-y-4">
                         <div className="text-center bg-slate-50 border-2 border-dashed border-slate-300 rounded-2xl p-4">
                             <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Código personal de {client.name}</div>
-                            <div className="text-4xl font-black text-slate-800 tracking-widest mt-2">{client.id}</div>
+                            <div className="text-5xl sm:text-6xl font-black text-pink-600 tracking-widest mt-2 drop-shadow-sm">{client.id}</div>
                         </div>
                         <textarea readOnly value={message} className="w-full h-52 p-4 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-mono text-slate-600 resize-none outline-none" />
                         <div className="grid grid-cols-2 gap-3">
@@ -612,7 +683,7 @@ Guarda este mensaje para tus próximos lives. 💖
                     <div className="bg-white p-8 rounded-3xl shadow-2xl space-y-6">
                         <div className="text-center">
                             <h1 className="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-pink-600 to-indigo-600 tracking-tighter">ADELITA STORE</h1>
-                            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Sistema Cloud v6.3</p>
+                            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Sistema Cloud v7.0</p>
                         </div>
                         <form onSubmit={handleLogin} className="space-y-4">
                             <div className="space-y-1">
@@ -959,16 +1030,23 @@ Guarda este mensaje para tus próximos lives. 💖
         const generateWaMessage = () => {
             try {
                 if (waTab === 'pending') {
+                    const outstanding = getOutstandingBalanceSummary(cycle);
                     let pendingMsg = `Hola ${activeClient.name || 'hermosa'} 👋\n\n`;
                     pendingMsg += `✨ *RESUMEN DE TU SALDITO* ✨\n\n`;
-                    pendingMsg += `👗 *Prendas acumuladas:* ${cycle.itemsCount}\n`;
-                    pendingMsg += `💰 *Saldo pendiente de ropa:* $${clothingDebt.toFixed(2)}\n`;
-                    if (shippingPending > 0.01) pendingMsg += `🚚 *Envío pendiente:* $${shippingPending.toFixed(2)}\n`;
+                    if (outstanding.lives.length > 0) {
+                        pendingMsg += `🛍️ *Lives que aún están pendientes:*\n`;
+                        outstanding.lives.forEach(group => {
+                            const garmentText = group.itemsCount > 0 ? ` · ${group.itemsCount} prenda${group.itemsCount === 1 ? '' : 's'}` : '';
+                            pendingMsg += `• *${group.label}*${garmentText} · $${Number(group.amount || 0).toFixed(2)}\n`;
+                        });
+                        pendingMsg += `\n👗 *Total de prendas pendientes:* ${outstanding.itemsCount}\n`;
+                    }
+                    pendingMsg += `💰 *Saldo pendiente de ropa:* $${outstanding.debt.toFixed(2)}\n`;
                     pendingMsg += `----------------------------------\n`;
-                    pendingMsg += `💵 *TOTAL A TRANSFERIR: $${finalBalance.toFixed(2)}*\n`;
+                    pendingMsg += `💵 *TOTAL A TRANSFERIR: $${outstanding.debt.toFixed(2)}*\n`;
 
-                    if (finalBalance > 0.01) {
-                        pendingMsg += `\n🏦 *DATOS BANCARIOS:*\nBanco Pichincha\nCuenta Ahorros\n2204226498\nBryan David Suárez\nCI: 1003300751\n\n📸 Mi bella, este es únicamente tu saldo pendiente actual. Por favor, ayúdanos compartiendo la fotito de tu pago. ✨\n`;
+                    if (outstanding.debt > 0.01) {
+                        pendingMsg += `\n🏦 *DATOS BANCARIOS:*\nBanco Pichincha\nCuenta Ahorros\n2204226498\nBryan David Suárez\nCI: 1003300751\n\n📸 Mi bella, este resumen contiene únicamente las prendas que siguen pendientes de pago. Por favor, ayúdanos compartiendo la fotito de tu pago. ✨\n`;
                     } else {
                         pendingMsg += `\n🎉 *¡TU CUENTA ESTÁ AL DÍA!*\n`;
                     }
@@ -1253,7 +1331,7 @@ Guarda este mensaje para tus próximos lives. 💖
                                 ) : (
                                     <>
                                         <div className="flex items-center gap-3">
-                                            <h1 className="text-4xl font-black text-slate-800">{activeClient.id}</h1>
+                                            <button onClick={()=>setShowCodeModal(true)} title="Toca para copiar o compartir el código" className="text-4xl font-black text-slate-800 hover:text-pink-600 active:scale-95 transition-all border-b-4 border-dotted border-pink-200 leading-tight">{activeClient.id}</button>
                                             <input value={activeClient.shelf || ''} onChange={e => logic.setClients(activeClient.id, { shelf: e.target.value.toUpperCase() })} placeholder="Percha (A1)" className="w-24 text-sm font-bold bg-amber-50 text-amber-800 border-2 border-amber-200 rounded-lg p-1 text-center outline-none focus:border-amber-500 uppercase" />
                                         </div>
                                         <div className="text-sm text-slate-500 mt-1"><span className="font-bold uppercase">{activeClient.name}</span> <button onClick={()=>setIsEditing(true)} className="ml-1 text-indigo-400 hover:text-indigo-600"><Icon.Edit /></button></div>
@@ -1267,7 +1345,6 @@ Guarda este mensaje para tus próximos lives. 💖
                                 <button onClick={()=>setShowTrash(true)} className="bg-orange-100 text-orange-700 p-2 rounded-xl flex items-center gap-1 font-bold text-[10px]"><Icon.Trash /> {clientTrash.length > 0 ? `Papelera (${clientTrash.length})` : 'Papelera'}</button>
                                 <button onClick={()=>setShowLabel(true)} className="bg-cyan-100 text-cyan-700 p-2 rounded-xl active:scale-95 transition-transform shadow-sm"><Icon.Printer /></button>
                                 <button onClick={()=>setShowInvoice(true)} className="bg-indigo-600 text-white p-2 rounded-xl active:scale-95 shadow-md"><Icon.FileText /></button>
-                                <button title="Compartir código" onClick={()=>setShowCodeModal(true)} className="bg-pink-100 text-pink-700 p-2 rounded-xl active:scale-95 transition-transform"><Icon.Hash /></button>
                                 <button onClick={()=>setShowWaModal(true)} className="bg-emerald-100 text-emerald-700 p-2 rounded-xl"><Icon.Message /></button>
                             </div>
                             {/* --- FIN ZONA PROTEGIDA --- */}
@@ -1414,6 +1491,7 @@ Guarda este mensaje para tus próximos lives. 💖
         const [newCity, setNewCity] = useState(""); const [newAddress, setNewAddress] = useState(""); 
         const [newAbono, setNewAbono] = useState(""); const [regDate, setRegDate] = useState(getToday()); const [manualId, setManualId] = useState("");
         const [registeredClient, setRegisteredClient] = useState(null);
+        const [codeClient, setCodeClient] = useState(null);
 
         useEffect(() => {
             if (jumpId) {
@@ -1488,6 +1566,7 @@ Guarda este mensaje para tus próximos lives. 💖
         return (
             <div className="flex flex-col h-full pb-20 landscape:pb-0 bg-[#f0f2f5]">
                 {registeredClient && <ClientCodeModal client={registeredClient} onClose={() => setRegisteredClient(null)} />}
+                {codeClient && <ClientCodeModal client={codeClient} onClose={() => setCodeClient(null)} />}
                 <div className="p-4 bg-white sticky top-0 z-10 space-y-3 shadow-sm">
                     <div className="flex gap-2">
                         <div className="flex-1 bg-slate-100 rounded-xl flex items-center px-3"><Icon.Search /><input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Buscar por CÓDIGO o Nombre..." className="bg-transparent w-full p-3 outline-none font-bold text-slate-600" /></div>
@@ -1565,7 +1644,11 @@ Guarda este mensaje para tus próximos lives. 💖
                             return (
                                 <div key={c.id} onClick={() => { setActiveClient(c); setView('detail'); }} className="bg-white p-4 rounded-2xl border border-slate-100 flex justify-between items-center touch-card shadow-sm h-auto landscape:h-full group hover:border-slate-300 transition-colors cursor-pointer">
                                     <div>
-                                        <div className="font-black text-xl text-slate-800 tracking-tight transition-colors">{c.id}</div>
+                                        <button
+                                            onClick={(event) => { event.stopPropagation(); setCodeClient(c); }}
+                                            title="Toca para copiar o compartir el código"
+                                            className="font-black text-xl text-slate-800 tracking-tight hover:text-pink-600 active:scale-95 transition-all border-b-2 border-dotted border-pink-200"
+                                        >{c.id}</button>
                                         <div className="flex flex-col mt-0.5">
                                             <span className="text-xs font-bold text-slate-500 uppercase">{c.name}</span>
                                             {c.city && <span className="text-[10px] text-slate-400 font-bold flex items-center gap-1"><i className="fas fa-map-marker-alt"></i> {c.city}</span>}
@@ -1688,6 +1771,10 @@ Guarda este mensaje para tus próximos lives. 💖
         const [packingDetail, setPackingDetail] = useState("");
 
         const [courierBank, setCourierBank] = useState('pichincha'); 
+        const [selectedBalanceIds, setSelectedBalanceIds] = useState([]);
+        const [balanceStatuses, setBalanceStatuses] = useState({});
+        const [isSendingBalances, setIsSendingBalances] = useState(false);
+        const balanceSelectionInitialized = useRef(false);
 
         useEffect(() => {
             if (selectedClient) {
@@ -1732,6 +1819,94 @@ Guarda este mensaje para tus próximos lives. 💖
             });
             return { prepList: prep, dispatchList: disp };
         }, [logic?.clients, logic?.sales, logic?.payments, logic?.shipments]);
+
+        const balanceRows = useMemo(() => {
+            const rows = [];
+            (logic?.clients || []).forEach(client => {
+                if (!client?.id) return;
+                try {
+                    const cycle = logic.getClientCycle(client.id);
+                    const templateData = buildBalanceTemplateData(client, cycle);
+                    if (templateData.amount <= 0.01) return;
+                    rows.push({ ...templateData, client, cycle, hasPhone: templateData.phone.length >= 10 });
+                } catch (error) {}
+            });
+            return rows.sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name));
+        }, [logic?.clients, logic?.sales, logic?.payments, logic?.shipments]);
+
+        useEffect(() => {
+            if (!balanceSelectionInitialized.current && balanceRows.length > 0) {
+                setSelectedBalanceIds(balanceRows.filter(row => row.hasPhone).map(row => row.clientId));
+                balanceSelectionInitialized.current = true;
+            }
+        }, [balanceRows]);
+
+        const selectedBalanceRows = balanceRows.filter(row => selectedBalanceIds.includes(row.clientId) && row.hasPhone);
+        const selectedBalanceTotal = selectedBalanceRows.reduce((sum, row) => sum + row.amount, 0);
+
+        const toggleBalanceRow = (clientId) => {
+            setSelectedBalanceIds(current => current.includes(clientId)
+                ? current.filter(id => id !== clientId)
+                : [...current, clientId]);
+        };
+
+        const selectAllBalances = () => {
+            const validIds = balanceRows.filter(row => row.hasPhone).map(row => row.clientId);
+            const allSelected = validIds.length > 0 && validIds.every(id => selectedBalanceIds.includes(id));
+            setSelectedBalanceIds(allSelected ? [] : validIds);
+        };
+
+        const buildManualBalanceMessage = (row) => {
+            const detail = (row.groups || []).map(group => {
+                const pieces = group.itemsCount > 0 ? ` · ${group.itemsCount} prenda${group.itemsCount === 1 ? '' : 's'}` : '';
+                return `• *${group.label}*${pieces} · $${Number(group.amount || 0).toFixed(2)}`;
+            }).join('\n');
+            return `Hola ${row.name} 👋\n\n✨ *ACTUALIZACIÓN DE TU COMPRA* ✨\n\n${detail}\n\n👗 *Prendas pendientes:* ${row.itemsCount}\n💰 *Saldo pendiente:* $${row.amount.toFixed(2)}\n\nEste resumen incluye únicamente las prendas pendientes de pago.\n\nGracias por comprar con nosotros 💖`;
+        };
+
+        const openManualBalance = (row) => {
+            window.open(`https://wa.me/${row.phone}?text=${encodeURIComponent(buildManualBalanceMessage(row))}`, '_blank', 'noopener,noreferrer');
+        };
+
+        const sendBalanceBatch = async () => {
+            if (selectedBalanceRows.length === 0) return alert('Selecciona al menos una clienta con número de WhatsApp.');
+            if (!window.fbFunctions?.httpsCallable || !window.fbFunctions?.functions) {
+                return alert('La conexión segura de WhatsApp todavía no está disponible. Usa el botón individual mientras activas el backend.');
+            }
+            if (!window.confirm(`Se enviarán ${selectedBalanceRows.length} mensajes por WhatsApp por un total pendiente de $${selectedBalanceTotal.toFixed(2)}. ¿Continuar?`)) return;
+
+            setIsSendingBalances(true);
+            setBalanceStatuses(Object.fromEntries(selectedBalanceRows.map(row => [row.clientId, 'sending'])));
+            try {
+                const callable = window.fbFunctions.httpsCallable(window.fbFunctions.functions, 'sendWhatsAppBalances');
+                const response = await callable({
+                    recipients: selectedBalanceRows.map(row => ({
+                        clientId: row.clientId,
+                        phone: row.phone,
+                        name: row.name,
+                        lives: row.lives,
+                        itemsCount: row.itemsCount,
+                        amount: row.amount
+                    }))
+                });
+                const results = response?.data?.results || [];
+                const nextStatuses = {};
+                selectedBalanceRows.forEach(row => { nextStatuses[row.clientId] = 'error'; });
+                results.forEach(result => { nextStatuses[result.clientId] = result.ok ? 'sent' : 'error'; });
+                setBalanceStatuses(nextStatuses);
+                const sentCount = results.filter(result => result.ok).length;
+                const failedCount = selectedBalanceRows.length - sentCount;
+                alert(failedCount > 0
+                    ? `Enviados: ${sentCount}. No enviados: ${failedCount}. Revisa los marcados en rojo.`
+                    : `¡Listo! Se enviaron ${sentCount} saldos por WhatsApp. ✅`);
+            } catch (error) {
+                console.error(error);
+                setBalanceStatuses(Object.fromEntries(selectedBalanceRows.map(row => [row.clientId, 'error'])));
+                alert('No fue posible realizar el envío automático. Verifica que el backend esté desplegado y que la plantilla de Meta esté aprobada.');
+            } finally {
+                setIsSendingBalances(false);
+            }
+        };
 
         const moveToDispatch = (client) => {
             if (!client || !client.id) return;
@@ -1922,6 +2097,7 @@ Guarda este mensaje para tus próximos lives. 💖
                 <div className="flex bg-white shadow-sm z-10">
                     <button onClick={() => setTab('prep')} className={`flex-1 py-4 text-xs font-black uppercase tracking-widest border-b-4 transition-colors ${tab==='prep' ? 'border-indigo-600 text-indigo-700 bg-indigo-50' : 'border-transparent text-slate-400 hover:bg-slate-50'}`}>1. Perchas ({prepList.length})</button>
                     <button onClick={() => setTab('dispatch')} className={`flex-1 py-4 text-xs font-black uppercase tracking-widest border-b-4 transition-colors ${tab==='dispatch' ? 'border-purple-600 text-purple-700 bg-purple-50' : 'border-transparent text-slate-400 hover:bg-slate-50'}`}>2. Despacho ({dispatchList.length})</button>
+                    <button onClick={() => setTab('balances')} className={`flex-1 py-4 text-xs font-black uppercase tracking-widest border-b-4 transition-colors ${tab==='balances' ? 'border-emerald-600 text-emerald-700 bg-emerald-50' : 'border-transparent text-slate-400 hover:bg-slate-50'}`}>3. Saldos ({balanceRows.length})</button>
                 </div>
                 
                 <div className="flex-1 overflow-y-auto p-4 pb-24">
@@ -1991,6 +2167,79 @@ Guarda este mensaje para tus próximos lives. 💖
                                 );
                             })}
                             {dispatchList.length===0 && <div className="text-center text-slate-400 py-10 font-bold italic border-2 border-dashed border-slate-200 rounded-2xl">No hay paquetes en esta ciudad.</div>}
+                        </div>
+                    )}
+
+                    {tab === 'balances' && (
+                        <div className="space-y-4 max-w-3xl mx-auto">
+                            <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-emerald-600 via-teal-600 to-cyan-700 text-white p-5 shadow-xl">
+                                <div className="absolute -right-8 -top-8 w-32 h-32 rounded-full bg-white/10"></div>
+                                <div className="relative">
+                                    <div className="text-[10px] font-black uppercase tracking-[0.25em] text-emerald-100">Revisión del día</div>
+                                    <h2 className="text-2xl font-black mt-1">Saldos por WhatsApp</h2>
+                                    <p className="text-xs text-emerald-50 mt-1 max-w-xl">Revisa quién debe, de cuáles lives y cuántas prendas. Tú eliges las clientas antes de enviar.</p>
+                                    <div className="grid grid-cols-3 gap-2 mt-5">
+                                        <div className="bg-white/15 rounded-2xl p-3 backdrop-blur-sm"><div className="text-[9px] font-black uppercase text-emerald-100">Pendientes</div><div className="text-2xl font-black">{balanceRows.length}</div></div>
+                                        <div className="bg-white/15 rounded-2xl p-3 backdrop-blur-sm"><div className="text-[9px] font-black uppercase text-emerald-100">Seleccionadas</div><div className="text-2xl font-black">{selectedBalanceRows.length}</div></div>
+                                        <div className="bg-white/15 rounded-2xl p-3 backdrop-blur-sm"><div className="text-[9px] font-black uppercase text-emerald-100">Por cobrar</div><div className="text-xl font-black">${selectedBalanceTotal.toFixed(2)}</div></div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="bg-white rounded-2xl p-3 shadow-sm border border-slate-100 flex items-center justify-between gap-3 sticky top-0 z-10">
+                                <button onClick={selectAllBalances} className="px-3 py-2 rounded-xl bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-wider active:scale-95 transition-transform">
+                                    {balanceRows.filter(row => row.hasPhone).length > 0 && balanceRows.filter(row => row.hasPhone).every(row => selectedBalanceIds.includes(row.clientId)) ? 'Quitar todas' : 'Seleccionar todas'}
+                                </button>
+                                <button onClick={sendBalanceBatch} disabled={isSendingBalances || selectedBalanceRows.length === 0} className="flex-1 max-w-sm bg-emerald-600 disabled:bg-slate-300 text-white py-3 rounded-xl font-black text-xs shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2 active:scale-95 transition-all">
+                                    <Icon.Message /> {isSendingBalances ? 'ENVIANDO…' : `ENVIAR ${selectedBalanceRows.length} SALDOS`}
+                                </button>
+                            </div>
+
+                            <div className="space-y-3">
+                                {balanceRows.map(row => {
+                                    const status = balanceStatuses[row.clientId];
+                                    const selected = selectedBalanceIds.includes(row.clientId) && row.hasPhone;
+                                    return (
+                                        <div key={row.clientId} className={`bg-white rounded-2xl border-2 p-4 shadow-sm transition-all ${selected ? 'border-emerald-300 ring-4 ring-emerald-50' : 'border-slate-100'} ${status === 'sent' ? 'bg-emerald-50' : status === 'error' ? 'bg-red-50 border-red-200' : ''}`}>
+                                            <div className="flex gap-3">
+                                                <label className={`mt-1 ${row.hasPhone ? 'cursor-pointer' : 'cursor-not-allowed opacity-40'}`}>
+                                                    <input type="checkbox" className="w-5 h-5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" checked={selected} disabled={!row.hasPhone || isSendingBalances} onChange={() => toggleBalanceRow(row.clientId)} />
+                                                </label>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex justify-between gap-2 items-start">
+                                                        <div>
+                                                            <div className="font-black text-slate-800 text-lg leading-none">{row.clientId}</div>
+                                                            <div className="text-xs font-bold text-slate-500 uppercase mt-1">{row.name}</div>
+                                                        </div>
+                                                        <div className="text-right">
+                                                            <div className="text-xl font-black text-red-600">${row.amount.toFixed(2)}</div>
+                                                            <div className="text-[9px] font-black uppercase text-slate-400">{row.itemsCount} prendas</div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="mt-3 space-y-1">
+                                                        {(row.groups || []).map(group => (
+                                                            <div key={group.key} className="flex justify-between gap-2 text-[10px] bg-slate-50 border border-slate-100 rounded-lg px-2.5 py-2">
+                                                                <span className="font-bold text-slate-600">🛍️ {group.label}{group.itemsCount > 0 ? ` · ${group.itemsCount} prenda${group.itemsCount === 1 ? '' : 's'}` : ''}</span>
+                                                                <span className="font-black text-slate-700">${Number(group.amount || 0).toFixed(2)}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                    <div className="flex justify-between items-center mt-3 gap-2">
+                                                        <div className={`text-[9px] font-bold ${row.hasPhone ? 'text-emerald-600' : 'text-red-500'}`}>{row.hasPhone ? `📞 +${row.phone}` : '⚠️ Falta un WhatsApp válido'}</div>
+                                                        <div className="flex items-center gap-2">
+                                                            {status === 'sending' && <span className="text-[9px] font-black text-amber-600 animate-pulse">ENVIANDO…</span>}
+                                                            {status === 'sent' && <span className="text-[9px] font-black text-emerald-700">ENVIADO ✅</span>}
+                                                            {status === 'error' && <span className="text-[9px] font-black text-red-600">NO ENVIADO</span>}
+                                                            {row.hasPhone && <button onClick={() => openManualBalance(row)} disabled={isSendingBalances} className="px-3 py-1.5 rounded-lg bg-emerald-100 text-emerald-700 text-[9px] font-black uppercase active:scale-95">Abrir uno</button>}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                                {balanceRows.length === 0 && <div className="text-center bg-white border-2 border-dashed border-emerald-200 rounded-3xl py-12 text-emerald-700"><div className="text-4xl mb-2">🎉</div><div className="font-black">¡No hay saldos pendientes!</div><div className="text-xs text-slate-400 mt-1">Todas las clientas están al día.</div></div>}
+                            </div>
                         </div>
                     )}
                 </div>
